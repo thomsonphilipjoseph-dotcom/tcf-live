@@ -1,0 +1,9 @@
+{
+  "name": "TCF Live Arthur v5",
+  "short_name": "TCF Live",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#080a0d",
+  "theme_color": "#080a0d",
+  "description": "Zero-cost French and Quebec-French live conversation copilot with local Qwen."
+}

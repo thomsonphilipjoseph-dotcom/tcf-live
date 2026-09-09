@@ -1,0 +1,344 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <meta name="theme-color" content="#080a0d" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="TCF Live" />
+  <link rel="manifest" href="./manifest.json" />
+  <link rel="stylesheet" href="./styles.css" />
+  <title>TCF Live</title>
+</head>
+<body>
+<div id="app">
+  <header>
+    <button id="homeButton" class="brandButton">
+      <div class="brand">TCF LIVE</div>
+      <div class="sub">Arthur + Qwen · French + Québécois · BTH661</div>
+    </button>
+
+    <div class="headerActions">
+      <button id="armHeadphones" class="arm">🎧 Arm</button>
+      <div id="stateDot" class="dot off"></div>
+    </div>
+  </header>
+
+  <main>
+    <!-- HOME = LIVE FIRST -->
+    <section id="home" class="page active">
+      <div id="needsSetup" class="setupGate hidden">
+        <div class="eyebrow">FIRST-TIME SETUP</div>
+        <h1>Enable automatic Live mode.</h1>
+        <p>
+          After this one-time setup, opening the app will immediately try to
+          start listening. If iOS asks for microphone permission again, one tap
+          may still be required.
+        </p>
+
+        <div class="starterChoice">
+          <div class="label">WHO USUALLY STARTS?</div>
+          <div class="segmented">
+            <button class="starterBtn active" data-start="them">They start</button>
+            <button class="starterBtn" data-start="me">I start</button>
+          </div>
+        </div>
+
+        <label class="checkrow">
+          <input id="autoLiveConsent" type="checkbox">
+          <span>
+            I will only open automatic Live mode after people in the
+            conversation know and agree that speech is being transcribed.
+          </span>
+        </label>
+
+        <button id="enableAutoLive" class="primary big">
+          Enable Auto Live
+        </button>
+      </div>
+
+      <div id="liveHome">
+        <div class="liveTop">
+          <div>
+            <div id="recordingLabel" class="recording">● STARTING LIVE…</div>
+            <div id="phaseTitle" class="phase">PREPARING</div>
+          </div>
+          <div class="rightMeta">
+            <div id="replyCount" class="counter">0 replies</div>
+            <div id="speakerConfidence" class="confidence">Expected: THEM</div>
+          </div>
+        </div>
+
+        <div id="expectedSpeakerStrip" class="expectedStrip">
+          <span>Expected next</span>
+          <button id="expectThem" class="miniChoice active">THEM</button>
+          <button id="expectMe" class="miniChoice">ME</button>
+        </div>
+
+        <div id="permissionFallback" class="fallback hidden">
+          <div class="fallbackIcon">🎙</div>
+          <div class="fallbackTitle">iPhone needs one tap.</div>
+          <div class="fallbackText">
+            Safari blocked or re-requested microphone access.
+          </div>
+          <button id="tapToListen" class="primary big">Tap to Listen</button>
+        </div>
+
+        <div id="listenPanel" class="listenPanel hidden">
+          <div class="pulse">● ● ●</div>
+          <div class="listenText">Listening to them…</div>
+          <div id="partialTranscript" class="partial"></div>
+        </div>
+
+        <div id="cuePanel" class="cuePanel hidden">
+          <div id="meaningBlock">
+            <div class="label">MEANING</div>
+            <div id="meaningText" class="meaning"></div>
+          </div>
+
+          <div class="label gap">START WITH</div>
+          <div id="starterText" class="starter"></div>
+
+          <div id="cueAudioState" class="hint">
+            Cue sent to the current iPhone audio route.
+          </div>
+        </div>
+
+        <div id="yourPanel" class="yourPanel hidden">
+          <div class="label">YOUR TURN</div>
+          <div class="yourTitle">Speak naturally.</div>
+          <div class="hint">
+            Arthur saves your French but does not correct you now.
+          </div>
+          <div id="yourPartial" class="partial"></div>
+        </div>
+
+        <div id="liveControls" class="row hidden">
+          <button id="pauseLive" class="secondary">Pause</button>
+          <button id="reverseTurn" class="secondary">↔ Reverse</button>
+          <button id="fixLastSpeaker" class="secondary">Fix last</button>
+        </div>
+
+        <button id="endConversation" class="danger big hidden">
+          ■ End Conversation & Correct Me
+        </button>
+
+        <div id="liveStatus" class="status"></div>
+
+        <!-- HOME OPTIONS -->
+        <div class="homeOptions">
+          <div class="eyebrow">TRAINING</div>
+          <h2>What else do you want to do?</h2>
+
+          <div class="optionGrid">
+            <button class="optionCard navTo" data-page="tcf">
+              <div class="optionIcon">9</div>
+              <div>
+                <strong>Prep TCF</strong>
+                <small>Warm-up · Tâche 2 · Tâche 3</small>
+              </div>
+            </button>
+
+            <button class="optionCard navTo" data-page="extra">
+              <div class="optionIcon">+</div>
+              <div>
+                <strong>Extra Practice</strong>
+                <small>Daily talk · listening · rescue drills</small>
+              </div>
+            </button>
+
+            <button class="optionCard navTo" data-page="review">
+              <div class="optionIcon">✓</div>
+              <div>
+                <strong>Review</strong>
+                <small>Corrections · recurring mistakes</small>
+              </div>
+            </button>
+
+            <button class="optionCard navTo" data-page="setup">
+              <div class="optionIcon">⚙</div>
+              <div>
+                <strong>Setup</strong>
+                <small>Qwen · BTH661 · cue style</small>
+              </div>
+            </button>
+          </div>
+        </div>
+
+        <div class="transcriptCard">
+          <div class="label">CURRENT CONVERSATION</div>
+          <div id="transcript"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- TCF PREP -->
+    <section id="tcf" class="page">
+      <button class="back navHome">‹ Back to Live</button>
+      <div class="eyebrow">TCF CANADA</div>
+      <h1>Prep TCF</h1>
+
+      <div class="moduleCard">
+        <div class="moduleNum">01</div>
+        <div class="moduleText">
+          <strong>Questions by heart</strong>
+          <small>Automate your universal Tâche 2 questions.</small>
+        </div>
+        <button id="startWarmup" class="secondary">Start</button>
+      </div>
+
+      <div id="warmupArea" class="practiceArea hidden">
+        <div class="label" id="warmupNumber">QUESTION 1 / 9</div>
+        <div id="warmupCue" class="practicePrompt"></div>
+        <textarea id="warmupInput" placeholder="Type or use iPhone Dictation…"></textarea>
+        <div class="row">
+          <button id="checkWarmup" class="primary">Check</button>
+          <button id="nextWarmup" class="secondary">Next</button>
+        </div>
+        <div id="warmupTarget" class="target hidden"></div>
+      </div>
+
+      <div class="moduleCard">
+        <div class="moduleNum">02</div>
+        <div class="moduleText">
+          <strong>Tâche 2 Simulation</strong>
+          <small>Interactive conversation. No corrections until Finish.</small>
+        </div>
+        <button class="secondary coming">Open</button>
+      </div>
+
+      <div class="moduleCard">
+        <div class="moduleNum">03</div>
+        <div class="moduleText">
+          <strong>Tâche 3 Simulation</strong>
+          <small>4-minute opinion, arguments and B2 assessment.</small>
+        </div>
+        <button class="secondary coming">Open</button>
+      </div>
+    </section>
+
+    <!-- EXTRA -->
+    <section id="extra" class="page">
+      <button class="back navHome">‹ Back to Live</button>
+      <div class="eyebrow">EVERYDAY FRENCH</div>
+      <h1>Extra Practice</h1>
+
+      <div class="extraGrid">
+        <button class="extraCard" data-extra="daily">
+          <span>💬</span><strong>Day-to-day Talk</strong>
+          <small>Small talk, work, metro, cafés, friends.</small>
+        </button>
+
+        <button class="extraCard" data-extra="listening">
+          <span>🎧</span><strong>Listening</strong>
+          <small>Short natural French episodes.</small>
+        </button>
+
+        <button class="extraCard" data-extra="rescue">
+          <span>⚡</span><strong>Rescue Drill</strong>
+          <small>Practice starting answers instantly.</small>
+        </button>
+
+        <button class="extraCard" data-extra="mistakes">
+          <span>↻</span><strong>My Weak Points</strong>
+          <small>Turn real conversation mistakes into drills.</small>
+        </button>
+      </div>
+
+      <div id="extraOutput" class="practiceArea">
+        <div class="label">EXTRA PRACTICE</div>
+        <div class="practicePrompt">
+          Choose one of the modules above.
+        </div>
+      </div>
+    </section>
+
+    <!-- REVIEW -->
+    <section id="review" class="page">
+      <button class="back navHome">‹ Back to Live</button>
+      <div class="eyebrow">AFTER CONVERSATION</div>
+      <h1>Review</h1>
+      <div id="reviewText" class="reviewCard">
+        End a Live conversation and Arthur will correct only your French here.
+      </div>
+
+      <h3>🇨🇦 Québec French heard today</h3>
+      <div id="quebecReview" class="reviewCard">
+        Québec expressions from real conversations will appear here.
+      </div>
+
+      <h3>Previous sessions</h3>
+      <div id="history"></div>
+    </section>
+
+    <!-- SETUP -->
+    <section id="setup" class="page">
+      <button class="back navHome">‹ Back to Live</button>
+      <div class="eyebrow">100% ZERO-COST</div>
+      <h1>Setup</h1>
+
+      <div class="card">
+        <div class="label">LOCAL QWEN</div>
+        <select id="model">
+          <option value="Qwen2.5-0.5B-Instruct-q4f16_1-MLC">
+            Qwen 0.5B · faster Live cues
+          </option>
+          <option value="Qwen2.5-1.5B-Instruct-q4f16_1-MLC">
+            Qwen 1.5B · better corrections
+          </option>
+        </select>
+        <button id="loadAI" class="primary">Download / Load Qwen</button>
+        <div class="progress"><div id="progressBar"></div></div>
+        <div id="aiStatus" class="status">AI not loaded.</div>
+      </div>
+
+      <div class="card">
+        <div class="label">BTH661</div>
+        <button id="testHeadphones" class="secondary full">
+          🎧 Test / Arm Headphone Cues
+        </button>
+        <div id="headphoneStatus" class="status">
+          Headphone speech must be armed after the app is reopened if iOS blocks automatic audio.
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="label">LIVE CUE</div>
+        <select id="cueMode">
+          <option value="starter">French starter only</option>
+          <option value="meaning">Meaning + French starter</option>
+        </select>
+      </div>
+
+      <div class="card">
+        <div class="label">DEFAULT FIRST SPEAKER</div>
+        <select id="defaultStarter">
+          <option value="them">They start</option>
+          <option value="me">I start</option>
+        </select>
+        <p class="small">You can change the expected speaker instantly with ↔ Reverse during Live.</p>
+      </div>
+
+      <div class="card">
+        <div class="label">AUTO LIVE</div>
+        <label class="switchrow">
+          <span>Start listening automatically when app opens</span>
+          <input id="autoStartSetting" type="checkbox">
+        </label>
+        <p class="small">
+          iOS can occasionally ask for microphone permission again. The app
+          falls back to a single Tap to Listen button when that happens.
+        </p>
+      </div>
+
+      <button id="resetSetup" class="dangerOutline full">
+        Reset first-time setup
+      </button>
+    </section>
+  </main>
+</div>
+
+<script type="module" src="./app.js"></script>
+</body>
+</html>
