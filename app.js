@@ -3,8 +3,8 @@ import * as webllm from "https://esm.run/@mlc-ai/web-llm@0.2.82";
 const $ = id => document.getElementById(id);
 const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
 
-const CONFIG_KEY = 'tcf-live-v5-config';
-const HISTORY_KEY = 'tcf-live-v5-history';
+const CONFIG_KEY = 'tcf-live-v6-config';
+const HISTORY_KEY = 'tcf-live-v6-history';
 
 const WARMUPS = [
   ["les différentes étapes de la procédure","Pouvez-vous m'expliquer les différentes étapes de la procédure ?"],
@@ -18,57 +18,11 @@ const WARMUPS = [
   ["un refus, une révision ou un recours","En cas de refus, est-il possible de demander une révision ou de faire un recours ?"]
 ];
 
-const LIVE_ANALYZE_SYSTEM = `You are Arthur, a private French and Québec-French conversation copilot.
-
-GOAL:
-Identify who most likely spoke, understand real spoken Québec French, normalize meaning without erasing the raw wording, and—ONLY when the speaker is THEM—prepare a tiny private reply cue.
-
-INPUT includes:
-- expected speaker: ME or THEM
-- whether Arthur just gave the learner a cue
-- recent conversation turns
-- raw French transcript
-
-QUEBEC FRENCH:
-Understand common Québec speech naturally, including informal pronunciation/transcription and vocabulary such as:
-faque/fait que, ben, pantoute, à soir, tantôt, char, dépanneur, magasiner, c'est correct, t'sais, j'vas, chu/chus, icitte, pogner, niaiser, plate.
-Do NOT assume these are errors. Interpret them in context.
-
-SPEAKER CLASSIFICATION:
-Use expected turn as a strong signal, but do not blindly alternate.
-Use sentence meaning and conversational context too.
-If the sentence sounds like a follow-up question or reaction from the other person, it may be THEM even if ME was expected.
-If it sounds like the learner responding to the previous question/cue, it may be ME.
-This is probabilistic, not biometric voice identification.
-
-Return EXACTLY these lines:
-SPEAKER: ME or THEM
-CONFIDENCE: integer 0-100
-NORMALIZED: clear standard French interpretation of the raw transcript
-MEANING: maximum 7 simple English words
-START: 2 to 5 natural French words that BEGIN a possible reply
-
-Rules:
-- If SPEAKER is ME, MEANING and START must be empty.
-- Never correct the learner during Live mode.
-- Never give a full scripted answer.
-- Do not lecture.
-- Prefer natural neutral/Canadian French for the reply starter, not forced slang.`;
-
 const REVIEW_SYSTEM = `You are Arthur, a strict but linguistically accurate B2 French coach.
 The real conversation has ended.
 
-The transcript contains RAW and NORMALIZED text and speaker labels.
-Correct ONLY turns marked ME.
-Never correct THEM.
-
-IMPORTANT QUEBEC RULE:
-Distinguish actual French errors from legitimate informal Québec French.
-Do not label a Québec expression as simply "wrong".
-When useful, show:
-- Québec oral form
-- standard French equivalent
-- TCF-preferred form
+Correct ONLY turns marked ME. Never correct THEM.
+Distinguish actual mistakes from legitimate informal Québec French.
 
 For every ME turn:
 YOU SAID:
@@ -84,11 +38,10 @@ TOP 3 DRILLS:
 
 Finally:
 QUEBEC FRENCH HEARD:
-List only Québec expressions that actually appeared in the conversation.
+List only Québec expressions actually present.
 For each: expression = standard meaning / short usage note.
 If none appeared, say "None detected."
-
-Be realistic, concise, and do not invent quotes.`;
+Do not invent quotes.`;
 
 let config = loadConfig();
 let engine = null;
@@ -119,39 +72,8 @@ function loadConfig(){
 }
 function saveConfig(){ localStorage.setItem(CONFIG_KEY,JSON.stringify(config)); }
 
-function setDot(s){ $('stateDot').className='dot '+s; }
-function status(t){ $('liveStatus').textContent=t; }
-
-function setExpected(speaker){
-  expectedSpeaker = speaker === 'me' ? 'me' : 'them';
-  $('expectThem')?.classList.toggle('active', expectedSpeaker==='them');
-  $('expectMe')?.classList.toggle('active', expectedSpeaker==='me');
-  if($('speakerConfidence')) $('speakerConfidence').textContent='Expected: '+expectedSpeaker.toUpperCase();
-  if($('phaseTitle')) $('phaseTitle').textContent = paused ? 'LIVE PAUSED' : (expectedSpeaker==='them'?'LISTENING TO THEM':'YOUR TURN');
-  showSpeakerPanel();
-}
-function showSpeakerPanel(){
-  if(!session || paused) return;
-  $('cuePanel').classList.add('hidden');
-  if(expectedSpeaker==='them'){
-    $('listenPanel').classList.remove('hidden');
-    $('yourPanel').classList.add('hidden');
-  }else{
-    $('listenPanel').classList.add('hidden');
-    $('yourPanel').classList.remove('hidden');
-  }
-}
-$('expectThem')?.addEventListener('click',()=>{stopRecognition();finalBuffer='';setExpected('them');setTimeout(startRecognition,120)});
-$('expectMe')?.addEventListener('click',()=>{stopRecognition();finalBuffer='';setExpected('me');setTimeout(startRecognition,120)});
-
-function parseLiveAnalysis(text){
-  const speaker=(text.match(/SPEAKER:\s*(ME|THEM)/i)?.[1]||expectedSpeaker).toLowerCase();
-  const confidence=Math.max(0,Math.min(100,Number(text.match(/CONFIDENCE:\s*(\d+)/i)?.[1]||65)));
-  const normalized=(text.match(/NORMALIZED:\s*(.*)/i)?.[1]||'').trim();
-  const meaning=(text.match(/MEANING:\s*(.*)/i)?.[1]||'').trim();
-  const start=(text.match(/START:\s*(.*)/i)?.[1]||'').trim();
-  return {speaker,confidence,normalized,meaning,start};
-}
+function setDot(s){ if($('stateDot')) $('stateDot').className='dot '+s; }
+function status(t){ if($('liveStatus')) $('liveStatus').textContent=t; }
 
 function configureAudio(){
   try{
@@ -164,50 +86,252 @@ function configureAudio(){
 function resetAudio(){
   try{if(navigator.audioSession) navigator.audioSession.type='auto'}catch{}
 }
+
 async function speakCue(text){
   if(!text || !headphonesArmed || !('speechSynthesis' in window)) return false;
   return new Promise(resolve=>{
     speakingCue=true;
     speechSynthesis.cancel();
     const u=new SpeechSynthesisUtterance(text);
-    u.lang='fr-CA';u.rate=.96;u.volume=.72;
+    u.lang='fr-CA';
+    u.rate=.96;
+    u.volume=.72;
     u.onend=()=>{speakingCue=false;resolve(true)};
     u.onerror=()=>{speakingCue=false;resolve(false)};
     speechSynthesis.speak(u);
   });
 }
 
+/* ------------------------------------------------------------------
+   FAST LIVE CUE ENGINE
+   This is intentionally lightweight so iPhone Live mode does NOT
+   require loading/inferencing a 1GB+ language model while the mic runs.
+------------------------------------------------------------------- */
+
+function simplify(s){
+  return (s || '')
+    .toLowerCase()
+    .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
+    .replace(/[’']/g,"'")
+    .replace(/\s+/g,' ')
+    .trim();
+}
+
+function normalizeQuebecFrench(raw){
+  let s = raw || '';
+  const rules = [
+    [/\bfaque\b|\bfait que\b/gi, 'alors'],
+    [/\bben\b/gi, 'bien'],
+    [/\bpantoute\b/gi, 'pas du tout'],
+    [/\bà soir\b|\ba soir\b/gi, 'ce soir'],
+    [/\bicitte\b/gi, 'ici'],
+    [/\bt['’]?sais\b/gi, 'tu sais'],
+    [/\bj['’]?vas\b/gi, 'je vais'],
+    [/\bchu\b|\bchus\b/gi, 'je suis'],
+    [/\bchar\b/gi, 'voiture'],
+    [/\bdépanneur\b/gi, 'dépanneur'],
+    [/\bmagasiner\b/gi, 'faire des achats']
+  ];
+  for(const [rx, rep] of rules) s = s.replace(rx, rep);
+
+  // Québec yes/no question pattern: "t'es-tu libre" -> "est-ce que tu es libre"
+  s = s.replace(/\bt['’]?es[- ]?tu\b/gi, 'est-ce que tu es');
+  s = s.replace(/\btu vas[- ]?tu\b/gi, 'est-ce que tu vas');
+  s = s.replace(/\btu veux[- ]?tu\b/gi, 'est-ce que tu veux');
+  return s.replace(/\s+/g,' ').trim();
+}
+
+function likelyQuestion(s){
+  const x=simplify(s);
+  const questionish = [
+    'est-ce que','es tu','t es tu','tu veux','tu peux','peux tu','pourquoi',
+    'comment','combien','quand','ou ','où','quel','quelle','quels','quelles',
+    'qu est ce','quoi','qui','depuis combien','ca fait combien','ça fait combien',
+    'tu fais quoi','tu viens d ou','tu viens d’où','tu habites','tu travailles',
+    'tu penses','ton avis','disponible','libre ce soir','libre a soir'
+  ];
+  return questionish.some(k=>x.includes(simplify(k))) || /\?$/.test(s.trim());
+}
+
+function classifySpeaker(raw){
+  const x=simplify(raw);
+
+  // Strongly prefer expected state.
+  let speaker=expectedSpeaker;
+  let confidence=82;
+
+  // If we expect ME after giving a cue but hear an obvious follow-up question,
+  // treat it as an interruption / continued THEM turn.
+  if(expectedSpeaker==='me' && likelyQuestion(raw)){
+    speaker='them';
+    confidence=78;
+  }
+
+  // If we expect THEM but hear a classic first-person answer, it may be ME.
+  const meSignals = [
+    'je suis','j habite','je travaille','je pense','a mon avis','à mon avis',
+    'je prefere','je préfère','j aime','j’aime','je vais','moi je','ca fait',
+    'ça fait','oui je','non je','personnellement'
+  ];
+  const answerLike = meSignals.some(k=>x.includes(simplify(k)));
+
+  if(expectedSpeaker==='them' && arthurJustCued && answerLike){
+    speaker='me';
+    confidence=76;
+  }
+
+  return {speaker,confidence};
+}
+
+function cueFor(raw){
+  const x=simplify(raw);
+  let meaning='They are talking to you.';
+  let start='Oui, je…';
+
+  // Time / duration
+  if(x.includes('combien de temps') || x.includes('depuis') || x.includes('ca fait combien') || x.includes('ça fait combien')){
+    meaning='Asking how long.';
+    start='Ça fait environ…';
+  }
+  // Origin
+  else if(x.includes('tu viens d') || x.includes("d'ou") || x.includes('d’où') || x.includes('origine')){
+    meaning='Asking where you are from.';
+    start='Je viens de…';
+  }
+  // Work
+  else if(x.includes('tu fais quoi') || x.includes('tu travailles') || x.includes('travail') || x.includes('job') || x.includes('domaine')){
+    meaning='Asking about your work.';
+    start='Je travaille dans…';
+  }
+  // Residence / location
+  else if(x.includes('tu habites') || x.includes('tu vis') || x.includes('tu restes ou') || x.includes('tu restes où')){
+    meaning='Asking where you live.';
+    start='J’habite à…';
+  }
+  // Availability / invitation
+  else if(x.includes('libre') || x.includes('disponible') || x.includes('ce soir') || x.includes('a soir') || x.includes('à soir')){
+    meaning='Asking if you are available.';
+    start='Oui, normalement…';
+  }
+  // Why
+  else if(x.includes('pourquoi')){
+    meaning='Asking why.';
+    start='C’est surtout parce que…';
+  }
+  // Opinion
+  else if(x.includes('tu penses') || x.includes('ton avis') || x.includes("qu'est-ce que t'en penses") || x.includes('qu est ce que t en penses')){
+    meaning='Asking your opinion.';
+    start='Personnellement, je pense…';
+  }
+  // Preference
+  else if(x.includes('tu preferes') || x.includes('tu préfères') || x.includes('tu aimes mieux') || x.includes('prefere') || x.includes('préfère')){
+    meaning='Asking what you prefer.';
+    start='Je préfère plutôt…';
+  }
+  // Weekend
+  else if(x.includes('fin de semaine') || x.includes('weekend') || x.includes('week-end')){
+    meaning='Asking about your weekend.';
+    start='Cette fin de semaine…';
+  }
+  // Plans / what will you do
+  else if(x.includes('tu vas faire') || x.includes('qu est ce que tu vas') || x.includes("qu'est-ce que tu vas")){
+    meaning='Asking about your plans.';
+    start='Je vais probablement…';
+  }
+  // How / condition
+  else if(x.includes('comment ca va') || x.includes('comment ça va') || x==='ca va' || x==='ça va'){
+    meaning='Asking how you are.';
+    start='Ça va bien…';
+  }
+  // Name
+  else if(x.includes('comment tu t appelles') || x.includes("t'appelles") || x.includes('ton nom')){
+    meaning='Asking your name.';
+    start='Je m’appelle…';
+  }
+  // Age
+  else if(x.includes('quel age') || x.includes('quel âge') || x.includes('tu as quel age') || x.includes('tu as quel âge')){
+    meaning='Asking your age.';
+    start='J’ai…';
+  }
+  // When
+  else if(x.includes('quand') || x.includes('quelle heure') || x.includes('a quelle heure') || x.includes('à quelle heure')){
+    meaning='Asking when.';
+    start='Normalement, vers…';
+  }
+  // Where
+  else if(x.startsWith('ou ') || x.includes(' où ') || x.includes('ou est') || x.includes('où est')){
+    meaning='Asking where.';
+    start='C’est près de…';
+  }
+  // How
+  else if(x.includes('comment')){
+    meaning='Asking how.';
+    start='En général, je…';
+  }
+  // Yes/no "do you..."
+  else if(x.includes('est ce que') || x.startsWith('tu ') || x.includes('t es tu')){
+    meaning='A yes-or-no question.';
+    start='Oui, en général…';
+  }
+  // Statement/reaction
+  else if(!likelyQuestion(raw)){
+    meaning='They made a comment.';
+    start='Oui, je comprends…';
+  }
+
+  return {meaning,start};
+}
+
+function fastAnalyze(raw){
+  const cls=classifySpeaker(raw);
+  const normalized=normalizeQuebecFrench(raw);
+  const cue=cls.speaker==='them' ? cueFor(normalized) : {meaning:'',start:''};
+  return {...cls,normalized,...cue};
+}
+
+/* ----------------------- QWEN: OPTIONAL ----------------------- */
+
 async function loadAI(){
   if(engine) return true;
-  $('aiStatus').textContent='Loading local Qwen…';
+
+  // iPhone safety: force the smallest live-compatible option.
+  const isiPhone=/iPhone|iPod/i.test(navigator.userAgent);
+  if(isiPhone){
+    config.model='Qwen2.5-0.5B-Instruct-q4f16_1-MLC';
+    if($('model')) $('model').value=config.model;
+    saveConfig();
+  }
+
+  if(!navigator.gpu){
+    if($('aiStatus')) $('aiStatus').textContent='WebGPU unavailable. Live cues still work without Qwen.';
+    return false;
+  }
+
+  if($('aiStatus')) $('aiStatus').textContent='Loading optional Qwen…';
   try{
     engine=await webllm.CreateMLCEngine(config.model,{
       initProgressCallback:p=>{
         const pct=Math.round((p.progress||0)*100);
-        $('progressBar').style.width=pct+'%';
-        $('aiStatus').textContent=(p.text||'Loading')+' · '+pct+'%';
-        status('Preparing local AI… '+pct+'%');
+        if($('progressBar')) $('progressBar').style.width=pct+'%';
+        if($('aiStatus')) $('aiStatus').textContent=(p.text||'Loading')+' · '+pct+'%';
       }
     });
-    $('aiStatus').textContent='Arthur ready · '+config.model;
-    setDot(session?'live':'ready');
+    if($('aiStatus')) $('aiStatus').textContent='Qwen ready · optional review AI';
     return true;
   }catch(e){
     engine=null;
-    $('aiStatus').textContent='AI load failed: '+(e?.message||e);
-    status('AI load failed.');
+    if($('aiStatus')) $('aiStatus').textContent='Qwen unavailable. Live cues still work.';
     return false;
   }
 }
-async function complete(messages,max_tokens=180){
-  if(!engine && !(await loadAI())) throw new Error('Local AI unavailable.');
+
+async function complete(messages,max_tokens=900){
+  if(!engine) throw new Error('Qwen not loaded');
   const r=await engine.chat.completions.create({messages,temperature:.15,max_tokens});
   return r.choices?.[0]?.message?.content?.trim()||'';
 }
 
-function recentContext(){
-  return turns.slice(-5).map((t,i)=>`${i+1}. ${t.speaker.toUpperCase()} RAW: ${t.raw}`).join('\n') || '(none)';
-}
+/* ----------------------- SPEECH ----------------------- */
 
 function newRecognition(){
   if(!SpeechRecognition) throw new Error('Speech recognition unavailable in this Safari/PWA.');
@@ -218,26 +342,33 @@ function newRecognition(){
 
   r.onresult=e=>{
     if(!session || paused || processing || speakingCue) return;
-    let interim='', committed='';
+
+    let interim='',committed='';
     for(let i=e.resultIndex;i<e.results.length;i++){
       const txt=e.results[i][0].transcript.trim();
       if(e.results[i].isFinal) committed+=(committed?' ':'')+txt;
       else interim+=(interim?' ':'')+txt;
     }
+
     if(committed){
       finalBuffer+=(finalBuffer?' ':'')+committed;
       clearTimeout(silenceTimer);
-      silenceTimer=setTimeout(finalizeTurn,1050);
+      silenceTimer=setTimeout(finalizeTurn,900);
     }
+
     const shown=(finalBuffer+' '+interim).trim();
-    if(expectedSpeaker==='them') $('partialTranscript').textContent=shown;
-    else $('yourPartial').textContent=shown;
+    if(expectedSpeaker==='them'){
+      if($('partialTranscript')) $('partialTranscript').textContent=shown;
+    }else{
+      if($('yourPartial')) $('yourPartial').textContent=shown;
+    }
   };
 
   r.onerror=e=>{
-    status('Speech permission/input: '+e.error);
+    status('Speech: '+e.error);
     if(['not-allowed','service-not-allowed'].includes(e.error)) showPermissionFallback();
   };
+
   r.onend=()=>{
     if(session && !paused && !processing && !speakingCue){
       setTimeout(()=>{try{r.start()}catch{}},120);
@@ -245,178 +376,180 @@ function newRecognition(){
   };
   return r;
 }
+
 function startRecognition(){
-  if(!session || paused) return;
+  if(!session || paused)return;
   stopRecognition();
   finalBuffer='';
   recognition=newRecognition();
-  try{recognition.start();hidePermissionFallback()}catch{showPermissionFallback()}
+  try{recognition.start();hidePermissionFallback()}
+  catch{showPermissionFallback()}
 }
-function stopRecognition(){try{recognition?.abort()}catch{} recognition=null;}
+function stopRecognition(){
+  try{recognition?.abort()}catch{}
+  recognition=null;
+}
 
 async function finalizeTurn(){
-  if(!session || paused || processing || !finalBuffer.trim()) return;
+  if(!session || paused || processing || !finalBuffer.trim())return;
+
   processing=true;
   const raw=finalBuffer.trim();
   finalBuffer='';
   stopRecognition();
 
-  try{
-    const analysisText=await complete([
-      {role:'system',content:LIVE_ANALYZE_SYSTEM},
-      {role:'user',content:
-`Expected speaker: ${expectedSpeaker.toUpperCase()}
-Arthur just gave learner a cue: ${arthurJustCued ? 'YES' : 'NO'}
+  // Critical v6 change: cue generation is immediate and DOES NOT call Qwen.
+  const a=fastAnalyze(raw);
 
-Recent turns:
-${recentContext()}
+  const turn={
+    id:Date.now()+'-'+Math.random(),
+    speaker:a.speaker,
+    confidence:a.confidence,
+    raw,
+    normalized:a.normalized||raw,
+    time:Date.now()
+  };
+  turns.push(turn);
+  renderTranscript();
 
-Raw transcript:
-${raw}`}
-    ],190);
-
-    const a=parseLiveAnalysis(analysisText);
-    const turn={
-      id:Date.now()+'-'+Math.random(),
-      speaker:a.speaker,
-      confidence:a.confidence,
-      raw,
-      normalized:a.normalized || raw,
-      time:Date.now()
-    };
-    turns.push(turn);
-    renderTranscript();
+  if($('speakerConfidence')){
     $('speakerConfidence').textContent=`Detected ${a.speaker.toUpperCase()} · ${a.confidence}%`;
+  }
 
-    if(a.speaker==='them'){
-      expectedSpeaker='me';
-      arthurJustCued=true;
-      $('meaningText').textContent=a.meaning;
-      $('starterText').textContent=a.start;
-      $('meaningBlock').classList.toggle('hidden',config.cueMode==='starter');
-      $('listenPanel').classList.add('hidden');
-      $('yourPanel').classList.add('hidden');
-      $('cuePanel').classList.remove('hidden');
+  if(a.speaker==='them'){
+    expectedSpeaker='me';
+    arthurJustCued=true;
 
-      configureAudio();
-      const spoken=config.cueMode==='meaning' ? `${a.meaning}. ${a.start}` : a.start;
-      const played=await speakCue(spoken);
+    if($('meaningText')) $('meaningText').textContent=a.meaning;
+    if($('starterText')) $('starterText').textContent=a.start;
+    if($('meaningBlock')) $('meaningBlock').classList.toggle('hidden',config.cueMode==='starter');
 
+    $('listenPanel')?.classList.add('hidden');
+    $('yourPanel')?.classList.add('hidden');
+    $('cuePanel')?.classList.remove('hidden');
+
+    configureAudio();
+    const spoken=config.cueMode==='meaning' ? `${a.meaning}. ${a.start}` : a.start;
+    const played=await speakCue(spoken);
+
+    if($('cueAudioState')){
       $('cueAudioState').textContent=headphonesArmed
-        ? (played?'Cue spoken through current audio route.':'iOS blocked cue audio; tap 🎧 Arm.')
+        ? (played?'Cue spoken through current audio route.':'Tap 🎧 Arm to enable spoken cues.')
         : 'Tap 🎧 Arm once to enable private spoken cues.';
-
-      processing=false;
-      setExpected('me');
-      setTimeout(()=>{
-        $('cuePanel').classList.add('hidden');
-        showSpeakerPanel();
-        status('Your turn · saved, not corrected.');
-        startRecognition();
-      },played?220:650);
-    }else{
-      // Learner speech is saved untouched. Never correct in Live.
-      expectedSpeaker='them';
-      arthurJustCued=false;
-      processing=false;
-      setExpected('them');
-      status('Listening to them…');
-      startRecognition();
     }
-  }catch(e){
+
     processing=false;
-    status('Live analysis error: '+(e?.message||e));
-    // Fall back to expected-turn logic rather than losing the session.
-    turns.push({
-      id:Date.now()+'-'+Math.random(),
-      speaker:expectedSpeaker,
-      confidence:40,
-      raw,
-      normalized:raw,
-      time:Date.now()
-    });
-    renderTranscript();
-    expectedSpeaker = expectedSpeaker==='them'?'me':'them';
-    setExpected(expectedSpeaker);
+    setExpected('me');
+
+    setTimeout(()=>{
+      $('cuePanel')?.classList.add('hidden');
+      showSpeakerPanel();
+      status('Your turn · no correction.');
+      startRecognition();
+    },played?180:650);
+
+  }else{
+    arthurJustCued=false;
+    processing=false;
+    setExpected('them');
+    status('Listening to them…');
     startRecognition();
   }
 }
 
+function setExpected(speaker){
+  expectedSpeaker=speaker==='me'?'me':'them';
+  $('expectThem')?.classList.toggle('active',expectedSpeaker==='them');
+  $('expectMe')?.classList.toggle('active',expectedSpeaker==='me');
+  if($('speakerConfidence')) $('speakerConfidence').textContent='Expected: '+expectedSpeaker.toUpperCase();
+  updatePhase();
+}
+function showSpeakerPanel(){
+  if(!session||paused)return;
+  $('cuePanel')?.classList.add('hidden');
+  if(expectedSpeaker==='them'){
+    $('listenPanel')?.classList.remove('hidden');
+    $('yourPanel')?.classList.add('hidden');
+  }else{
+    $('listenPanel')?.classList.add('hidden');
+    $('yourPanel')?.classList.remove('hidden');
+  }
+}
+function updatePhase(){
+  if($('phaseTitle')) $('phaseTitle').textContent=paused?'LIVE PAUSED':(expectedSpeaker==='them'?'LISTENING TO THEM':'YOUR TURN');
+  if($('recordingLabel')) $('recordingLabel').textContent=paused?'● PAUSED':'● LIVE TRANSCRIPTION';
+  setDot(paused?'paused':'live');
+  showSpeakerPanel();
+}
 function renderTranscript(){
-  const box=$('transcript');box.innerHTML='';
+  const box=$('transcript');
+  if(!box)return;
+  box.innerHTML='';
   turns.slice(-8).forEach(t=>{
     const d=document.createElement('div');d.className='turn';
     const tag=document.createElement('div');tag.className='tag '+(t.speaker==='me'?'me':'them');
     tag.textContent=`${t.speaker==='me'?'ME':'THEM'} · ${t.confidence}%`;
     const tx=document.createElement('div');tx.className='turnText';tx.textContent=t.raw;
     d.append(tag,tx);
-    if(t.normalized && t.normalized.toLowerCase()!==t.raw.toLowerCase()){
-      const n=document.createElement('div');n.className='normalized';
-      n.textContent='↳ '+t.normalized;
-      d.appendChild(n);
+    if(t.normalized && simplify(t.normalized)!==simplify(t.raw)){
+      const n=document.createElement('div');n.className='normalized';n.textContent='↳ '+t.normalized;d.appendChild(n);
     }
     box.appendChild(d);
   });
-  $('replyCount').textContent=turns.filter(t=>t.speaker==='me').length+' replies';
+  if($('replyCount')) $('replyCount').textContent=turns.filter(t=>t.speaker==='me').length+' replies';
 }
 
-function updatePhase(){
-  $('phaseTitle').textContent=paused?'LIVE PAUSED':(expectedSpeaker==='them'?'LISTENING TO THEM':'YOUR TURN');
-  $('recordingLabel').textContent=paused?'● PAUSED':'● LIVE TRANSCRIPTION';
-  setDot(paused?'paused':'live');
-  showSpeakerPanel();
-}
 function showPermissionFallback(){
-  $('permissionFallback').classList.remove('hidden');
-  $('listenPanel').classList.add('hidden');
-  $('yourPanel').classList.add('hidden');
-  $('cuePanel').classList.add('hidden');
-  $('liveControls').classList.add('hidden');
-  $('endConversation').classList.add('hidden');
+  $('permissionFallback')?.classList.remove('hidden');
+  $('listenPanel')?.classList.add('hidden');
+  $('yourPanel')?.classList.add('hidden');
+  $('cuePanel')?.classList.add('hidden');
+  $('liveControls')?.classList.add('hidden');
+  $('endConversation')?.classList.add('hidden');
   setDot('paused');
 }
 function hidePermissionFallback(){
-  $('permissionFallback').classList.add('hidden');
-  $('liveControls').classList.remove('hidden');
-  $('endConversation').classList.remove('hidden');
+  $('permissionFallback')?.classList.add('hidden');
+  $('liveControls')?.classList.remove('hidden');
+  $('endConversation')?.classList.remove('hidden');
   showSpeakerPanel();
 }
 
 async function startLive({automatic=false}={}){
   if(!config.setupComplete){showSetupGate();return}
-  if(!SpeechRecognition){showPermissionFallback();status('Speech recognition is unavailable.');return}
+  if(!SpeechRecognition){showPermissionFallback();status('Speech recognition unavailable.');return}
 
-  $('needsSetup').classList.add('hidden');
-  $('liveHome').classList.remove('hidden');
-  $('recordingLabel').textContent='● STARTING LIVE…';
-  $('phaseTitle').textContent='PREPARING';
-  setDot('paused');
+  $('needsSetup')?.classList.add('hidden');
+  $('liveHome')?.classList.remove('hidden');
 
-  const aiOK=await loadAI();
-  if(!aiOK)return;
-
+  // v6: DO NOT LOAD QWEN HERE.
+  // Live must start immediately and remain memory-safe.
   configureAudio();
-  session=true;paused=false;processing=false;turns=[];arthurJustCued=false;
-  setExpected(config.defaultStarter || 'them');
+  session=true;
+  paused=false;
+  processing=false;
+  turns=[];
+  arthurJustCued=false;
+  setExpected(config.defaultStarter||'them');
   renderTranscript();
-  status(automatic?'Auto Live starting…':'Starting Live…');
 
-  try{startRecognition();updatePhase();status(expectedSpeaker==='them'?'Listening to them…':'Your turn…')}
+  status(automatic?'Auto Live · lightweight cue engine ready.':'Live cue engine ready.');
+  try{startRecognition();updatePhase()}
   catch{showPermissionFallback()}
 }
 
 function showSetupGate(){
-  $('needsSetup').classList.remove('hidden');
-  $('liveHome').classList.add('hidden');
+  $('needsSetup')?.classList.remove('hidden');
+  $('liveHome')?.classList.add('hidden');
   setDot('off');
 }
 function pauseForNavigation(){
-  if(!session || paused)return;
-  paused=true;resumeAfterPage=true;stopRecognition();updatePhase();status('Live paused while you practice.');
+  if(!session||paused)return;
+  paused=true;resumeAfterPage=true;stopRecognition();updatePhase();
 }
 function resumeFromNavigation(){
-  if(session && paused && resumeAfterPage){
-    paused=false;resumeAfterPage=false;updatePhase();status('Listening resumed…');startRecognition();
+  if(session&&paused&&resumeAfterPage){
+    paused=false;resumeAfterPage=false;updatePhase();startRecognition();
   }
 }
 function navigate(page){
@@ -424,11 +557,11 @@ function navigate(page){
   if(page!=='home')pauseForNavigation();else resumeFromNavigation();
   if(page==='review')renderHistory();
 }
+
 document.querySelectorAll('.navTo').forEach(b=>b.onclick=()=>navigate(b.dataset.page));
 document.querySelectorAll('.navHome').forEach(b=>b.onclick=()=>navigate('home'));
-$('homeButton').onclick=()=>navigate('home');
+if($('homeButton')) $('homeButton').onclick=()=>navigate('home');
 
-// First-time default speaker
 document.querySelectorAll('.starterBtn').forEach(b=>{
   b.onclick=()=>{
     document.querySelectorAll('.starterBtn').forEach(x=>x.classList.remove('active'));
@@ -437,23 +570,24 @@ document.querySelectorAll('.starterBtn').forEach(b=>{
   };
 });
 
-$('enableAutoLive').onclick=()=>{
+if($('enableAutoLive')) $('enableAutoLive').onclick=()=>{
   if(!$('autoLiveConsent').checked){
     alert('Please confirm the transcription/consent rule first.');return;
   }
   config.setupComplete=true;config.autoStart=true;saveConfig();
-  $('autoStartSetting').checked=true;
-  $('defaultStarter').value=config.defaultStarter;
-  $('needsSetup').classList.add('hidden');$('liveHome').classList.remove('hidden');
+  if($('autoStartSetting')) $('autoStartSetting').checked=true;
+  if($('defaultStarter')) $('defaultStarter').value=config.defaultStarter;
+  $('needsSetup').classList.add('hidden');
+  $('liveHome').classList.remove('hidden');
   startLive();
 };
 
-$('tapToListen').onclick=()=>{
-  if(!session) startLive();
+if($('tapToListen')) $('tapToListen').onclick=()=>{
+  if(!session)startLive();
   else{paused=false;hidePermissionFallback();startRecognition();updatePhase()}
 };
 
-$('pauseLive').onclick=()=>{
+if($('pauseLive')) $('pauseLive').onclick=()=>{
   if(!session)return;
   paused=!paused;
   if(paused){stopRecognition();status('Live paused.')}
@@ -461,8 +595,7 @@ $('pauseLive').onclick=()=>{
   updatePhase();
 };
 
-// REVERSE = change who is expected NEXT. Does not edit prior transcript.
-$('reverseTurn').onclick=()=>{
+if($('reverseTurn')) $('reverseTurn').onclick=()=>{
   if(!session)return;
   stopRecognition();finalBuffer='';
   setExpected(expectedSpeaker==='them'?'me':'them');
@@ -471,60 +604,89 @@ $('reverseTurn').onclick=()=>{
   setTimeout(startRecognition,120);
 };
 
-// FIX LAST = repair an already completed turn.
-$('fixLastSpeaker').onclick=()=>{
+if($('fixLastSpeaker')) $('fixLastSpeaker').onclick=()=>{
   if(!turns.length)return;
   const last=turns[turns.length-1];
   last.speaker=last.speaker==='me'?'them':'me';
   last.confidence=100;
   renderTranscript();
-  $('speakerConfidence').textContent=`Last corrected manually → ${last.speaker.toUpperCase()}`;
+  if($('speakerConfidence')) $('speakerConfidence').textContent=`Last corrected manually → ${last.speaker.toUpperCase()}`;
 };
 
-$('endConversation').onclick=async()=>{
-  session=false;paused=false;resumeAfterPage=false;stopRecognition();clearTimeout(silenceTimer);resetAudio();
+$('expectThem')?.addEventListener('click',()=>{stopRecognition();finalBuffer='';setExpected('them');setTimeout(startRecognition,120)});
+$('expectMe')?.addEventListener('click',()=>{stopRecognition();finalBuffer='';setExpected('me');setTimeout(startRecognition,120)});
+
+function localReview(){
+  const me=turns.filter(t=>t.speaker==='me');
+  let out='Qwen is not loaded, so the conversation was saved safely.\n\nYOUR TURNS:\n';
+  out += me.map((t,i)=>`${i+1}. ${t.raw}`).join('\n');
+  out += '\n\nLoad Qwen from Setup only when you want deeper after-conversation correction.';
+  return out;
+}
+
+if($('endConversation')) $('endConversation').onclick=async()=>{
+  session=false;paused=false;resumeAfterPage=false;
+  stopRecognition();clearTimeout(silenceTimer);resetAudio();
   setDot(engine?'ready':'off');
 
   const mine=turns.filter(t=>t.speaker==='me');
   if(!mine.length){status('Conversation ended. No learner replies captured.');return}
 
   navigate('review');
-  $('reviewText').textContent='Arthur is correcting only your French…';
-  $('quebecReview').textContent='Analysing Québec expressions…';
+  $('reviewText').textContent='Preparing review…';
+  $('quebecReview').textContent='Checking expressions…';
 
   const transcript=turns.map((t,i)=>
 `${i+1}. ${t.speaker.toUpperCase()} (${t.confidence}%)
 RAW: ${t.raw}
 NORMALIZED: ${t.normalized}`).join('\n\n');
 
-  try{
-    const review=await complete([
-      {role:'system',content:REVIEW_SYSTEM},
-      {role:'user',content:transcript}
-    ],1400);
-
-    const qIndex=review.indexOf('QUEBEC FRENCH HEARD:');
-    if(qIndex>=0){
-      $('reviewText').textContent=review.slice(0,qIndex).trim();
-      $('quebecReview').textContent=review.slice(qIndex+'QUEBEC FRENCH HEARD:'.length).trim();
-    }else{
-      $('reviewText').textContent=review;
-      $('quebecReview').textContent='No separate Québec-expression section returned.';
+  let review;
+  if(engine){
+    try{
+      review=await complete([
+        {role:'system',content:REVIEW_SYSTEM},
+        {role:'user',content:transcript}
+      ],1200);
+    }catch{
+      review=localReview();
     }
-
-    const h=getHistory();
-    h.unshift({date:new Date().toISOString(),turns:[...turns],review});
-    localStorage.setItem(HISTORY_KEY,JSON.stringify(h.slice(0,30)));
-    renderHistory();
-  }catch(e){
-    $('reviewText').textContent='Review error: '+(e?.message||e);
-    $('quebecReview').textContent='Could not analyse Québec expressions.';
+  }else{
+    review=localReview();
   }
+
+  const qIndex=review.indexOf('QUEBEC FRENCH HEARD:');
+  if(qIndex>=0){
+    $('reviewText').textContent=review.slice(0,qIndex).trim();
+    $('quebecReview').textContent=review.slice(qIndex+'QUEBEC FRENCH HEARD:'.length).trim();
+  }else{
+    $('reviewText').textContent=review;
+    const heard=[];
+    const joined=turns.map(t=>simplify(t.raw)).join(' ');
+    [
+      ['faque','donc / alors'],
+      ['pantoute','pas du tout'],
+      ['a soir','ce soir'],
+      ['tantot','tout à l’heure / plus tard, selon contexte'],
+      ['char','voiture'],
+      ['depanneur','dépanneur / convenience store'],
+      ['icitte','ici'],
+      ['chu','je suis'],
+      ['j vas','je vais']
+    ].forEach(([k,v])=>{if(joined.includes(k))heard.push(`${k} = ${v}`)});
+    $('quebecReview').textContent=heard.length?heard.join('\n'):'No Québec expressions detected by the lightweight layer.';
+  }
+
+  const h=getHistory();
+  h.unshift({date:new Date().toISOString(),turns:[...turns],review});
+  localStorage.setItem(HISTORY_KEY,JSON.stringify(h.slice(0,30)));
+  renderHistory();
 };
 
 function getHistory(){try{return JSON.parse(localStorage.getItem(HISTORY_KEY)||'[]')}catch{return[]}}
 function renderHistory(){
-  const box=$('history');box.innerHTML='';
+  const box=$('history');if(!box)return;
+  box.innerHTML='';
   const h=getHistory();
   if(!h.length){box.innerHTML='<div class="small">No previous sessions yet.</div>';return}
   h.slice(0,10).forEach(x=>{
@@ -535,82 +697,104 @@ function renderHistory(){
   });
 }
 
-$('armHeadphones').onclick=async()=>{
+if($('armHeadphones')) $('armHeadphones').onclick=async()=>{
   configureAudio();headphonesArmed=true;
   await speakCue("Arthur prêt.");
   $('armHeadphones').textContent='🎧 Armed';
-  $('headphoneStatus').textContent='Headphone cues armed for this app session.';
+  if($('headphoneStatus')) $('headphoneStatus').textContent='Headphone cues armed for this app session.';
 };
-$('testHeadphones').onclick=async()=>{
+if($('testHeadphones')) $('testHeadphones').onclick=async()=>{
   configureAudio();headphonesArmed=true;
   await speakCue("Arthur connecté. Mode écouteurs prêt.");
-  $('armHeadphones').textContent='🎧 Armed';
-  $('headphoneStatus').textContent='If you heard that in BTH661, the active route is ready.';
+  if($('armHeadphones')) $('armHeadphones').textContent='🎧 Armed';
+  if($('headphoneStatus')) $('headphoneStatus').textContent='If you heard that in BTH661, the active route is ready.';
 };
 
-$('loadAI').onclick=async()=>{
-  config.model=$('model').value;saveConfig();
-  if(engine){try{await engine.unload?.()}catch{} engine=null}
+if($('loadAI')) $('loadAI').onclick=async()=>{
+  // Always use 0.5B on iPhone v6.
+  if(/iPhone|iPod/i.test(navigator.userAgent)){
+    config.model='Qwen2.5-0.5B-Instruct-q4f16_1-MLC';
+    if($('model')) $('model').value=config.model;
+  }else if($('model')){
+    config.model=$('model').value;
+  }
+  saveConfig();
+  if(engine){try{await engine.unload?.()}catch{}engine=null}
   await loadAI();
 };
-$('cueMode').onchange=e=>{config.cueMode=e.target.value;saveConfig()};
-$('autoStartSetting').onchange=e=>{config.autoStart=e.target.checked;saveConfig()};
-$('defaultStarter').onchange=e=>{
-  config.defaultStarter=e.target.value;saveConfig();
-  if(!session)setExpected(config.defaultStarter);
-};
-$('resetSetup').onclick=()=>{
+
+if($('cueMode')) $('cueMode').onchange=e=>{config.cueMode=e.target.value;saveConfig()};
+if($('autoStartSetting')) $('autoStartSetting').onchange=e=>{config.autoStart=e.target.checked;saveConfig()};
+if($('defaultStarter')) $('defaultStarter').onchange=e=>{config.defaultStarter=e.target.value;saveConfig();if(!session)setExpected(config.defaultStarter)};
+if($('resetSetup')) $('resetSetup').onclick=()=>{
   if(confirm('Reset Auto Live first-time setup?')){
     config.setupComplete=false;config.autoStart=true;saveConfig();
     session=false;stopRecognition();showSetupGate();navigate('home');
   }
 };
 
-// TCF warm-up
+// Warm-up
 function updateWarmup(){
+  if(!$('warmupNumber'))return;
   $('warmupNumber').textContent=`QUESTION ${warmupIndex+1} / ${WARMUPS.length}`;
   $('warmupCue').textContent=`Pose une question sur ${WARMUPS[warmupIndex][0]}.`;
   $('warmupInput').value='';
   $('warmupTarget').textContent=WARMUPS[warmupIndex][1];
   $('warmupTarget').classList.add('hidden');
 }
-$('startWarmup').onclick=()=>{$('warmupArea').classList.remove('hidden');updateWarmup()};
-$('checkWarmup').onclick=()=>{if($('warmupInput').value.trim())$('warmupTarget').classList.remove('hidden')};
-$('nextWarmup').onclick=()=>{warmupIndex=(warmupIndex+1)%WARMUPS.length;updateWarmup()};
+if($('startWarmup')) $('startWarmup').onclick=()=>{$('warmupArea').classList.remove('hidden');updateWarmup()};
+if($('checkWarmup')) $('checkWarmup').onclick=()=>{if($('warmupInput').value.trim())$('warmupTarget').classList.remove('hidden')};
+if($('nextWarmup')) $('nextWarmup').onclick=()=>{warmupIndex=(warmupIndex+1)%WARMUPS.length;updateWarmup()};
 
-// Extra practice
+// Extra
 const extras={
   daily:"Situation: Tu rencontres quelqu'un au travail après le week-end. Commence une conversation naturelle en français et pose une question de suivi.",
   listening:"Listening mode will include standard French and authentic Québec-French patterns.",
   rescue:"Quick rescue drill: Someone asks « Qu'est-ce que t'en penses ? » Start immediately with 3–5 natural French words.",
-  mistakes:"Finish real Live conversations first. Arthur will turn your recurring mistakes and Québec expressions into drills."
+  mistakes:"Finish real Live conversations first. Arthur will turn recurring mistakes and Québec expressions into drills."
 };
-document.querySelectorAll('.extraCard').forEach(b=>{
-  b.onclick=()=>{$('extraOutput').querySelector('.practicePrompt').textContent=extras[b.dataset.extra]};
-});
-document.querySelectorAll('.coming').forEach(b=>{
-  b.onclick=()=>alert('TCF Tâche 2/3 will use the same local Qwen engine; this remains in the next implementation pass.');
-});
+document.querySelectorAll('.extraCard').forEach(b=>b.onclick=()=>{$('extraOutput').querySelector('.practicePrompt').textContent=extras[b.dataset.extra]});
+document.querySelectorAll('.coming').forEach(b=>b.onclick=()=>alert('This training module is still in the next implementation pass.'));
 
 // Setup UI
-$('model').value=config.model;
-$('cueMode').value=config.cueMode;
-$('autoStartSetting').checked=config.autoStart;
-$('defaultStarter').value=config.defaultStarter;
+if($('model')){
+  // Remove/disable 1.5B on iPhone because it already reproduced a Safari crash.
+  if(/iPhone|iPod/i.test(navigator.userAgent)){
+    [...$('model').options].forEach(o=>{
+      if(o.value.includes('1.5B')) o.disabled=true;
+    });
+    config.model='Qwen2.5-0.5B-Instruct-q4f16_1-MLC';
+  }
+  $('model').value=config.model;
+}
+if($('cueMode')) $('cueMode').value=config.cueMode;
+if($('autoStartSetting')) $('autoStartSetting').checked=config.autoStart;
+if($('defaultStarter')) $('defaultStarter').value=config.defaultStarter;
 setExpected(config.defaultStarter);
 
 async function boot(){
   renderHistory();
+
+  // Carry v5 setup state forward if it existed.
+  try{
+    const old=JSON.parse(localStorage.getItem('tcf-live-v5-config')||'null');
+    if(old && !config.setupComplete){
+      config={...config,...old,model:'Qwen2.5-0.5B-Instruct-q4f16_1-MLC'};
+      saveConfig();
+    }
+  }catch{}
+
   if(!config.setupComplete){showSetupGate();return}
-  $('needsSetup').classList.add('hidden');$('liveHome').classList.remove('hidden');
+  $('needsSetup').classList.add('hidden');
+  $('liveHome').classList.remove('hidden');
+
   if(config.autoStart){
     try{await startLive({automatic:true})}catch{showPermissionFallback()}
   }else{
     showPermissionFallback();
-    document.querySelector('.fallbackTitle').textContent='Live is ready.';
-    document.querySelector('.fallbackText').textContent='Auto-start is disabled in Setup.';
   }
 }
+
 if('serviceWorker' in navigator){
   window.addEventListener('load',()=>{
     navigator.serviceWorker.register('./sw.js').catch(()=>{});
