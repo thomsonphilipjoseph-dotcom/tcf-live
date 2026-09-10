@@ -3,8 +3,8 @@ import * as webllm from "https://esm.run/@mlc-ai/web-llm@0.2.82";
 const $ = id => document.getElementById(id);
 const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
 
-const CONFIG_KEY = 'tcf-live-v6-config';
-const HISTORY_KEY = 'tcf-live-v6-history';
+const CONFIG_KEY = 'tcf-live-v7-config';
+const HISTORY_KEY = 'tcf-live-v7-history';
 
 const WARMUPS = [
   ["les différentes étapes de la procédure","Pouvez-vous m'expliquer les différentes étapes de la procédure ?"],
@@ -59,13 +59,22 @@ let warmupIndex = 0;
 let resumeAfterPage = false;
 let arthurJustCued = false;
 
+// v7 sentence-copilot state
+let meTurnBuffer = '';
+let meAssistTimer = null;
+let meFinishTimer = null;
+let assistanceLog = [];
+let assistanceCount = 0;
+let autoAssistEnabled = config.autoAssist !== false;
+
 function loadConfig(){
   const defaults = {
     setupComplete:false,
     autoStart:true,
     cueMode:'starter',
     model:'Qwen2.5-0.5B-Instruct-q4f16_1-MLC',
-    defaultStarter:'them'
+    defaultStarter:'them',
+    autoAssist:true
   };
   try{return {...defaults,...JSON.parse(localStorage.getItem(CONFIG_KEY)||'{}')}}
   catch{return defaults}
@@ -289,6 +298,196 @@ function fastAnalyze(raw){
   return {...cls,normalized,...cue};
 }
 
+
+/* ------------------------------------------------------------------
+   v7 ME-SIDE SENTENCE COPILOT
+   Gives tiny continuation cues while the learner is speaking.
+   No correction happens during Live.
+------------------------------------------------------------------- */
+
+function endsLikeCompleteIdea(raw){
+  const s = simplify(raw);
+  if(!s) return false;
+  if(/[.!?…]$/.test(raw.trim())) return true;
+
+  const unfinished = [
+    'et','mais','parce que','car','donc','alors','aussi','ensuite',
+    'quand','si','comme','pour','avec','sans','de','du','des','un','une',
+    'je veux','je voulais','je pense','je crois','j aime','j’aime',
+    'je travaille','je vais','je suis','ca fait','ça fait','en plus'
+  ];
+  if(unfinished.some(x => s.endsWith(simplify(x)))) return false;
+  return s.split(' ').length >= 7;
+}
+
+function looksUnfinished(raw){
+  const s = simplify(raw);
+  if(!s) return false;
+  const tails = [
+    'et','mais','parce que','car','donc','alors','aussi','ensuite',
+    'quand','si','comme','pour','avec','sans','de','du','des','un','une',
+    'je veux','je voulais','je voudrais','je pense','je crois',
+    'j aime','j’aime','je travaille','je vais','je suis',
+    'c est','c’est','ca fait','ça fait','il y a','en plus',
+    'principalement','surtout','normalement','generalement','généralement'
+  ];
+  if(tails.some(x => s.endsWith(simplify(x)))) return true;
+  if(/\b(euh|heu|hmm|hum|genre|comme)\s*$/.test(s)) return true;
+  return s.split(' ').length <= 5 && !/[.!?…]$/.test(raw.trim());
+}
+
+function continuationFor(raw){
+  const s = simplify(raw);
+  let kind = 'phrase';
+  let cue = 'et aussi…';
+
+  if(s.endsWith('parce que') || s.endsWith('car')) cue = 'je voulais surtout…';
+  else if(s.endsWith('je voulais') || s.endsWith('je veux')) cue = 'avoir une meilleure…';
+  else if(s.endsWith('une meilleure')) cue = 'qualité de vie…';
+  else if(s.endsWith('je travaille comme')) cue = 'technicien en…';
+  else if(s.endsWith('je travaille') || s.endsWith('au travail je')) cue = 'principalement sur…';
+  else if(s.endsWith('je pense') || s.endsWith('je crois')) cue = 'que c’est important…';
+  else if(s.endsWith('a mon avis') || s.endsWith('à mon avis')) cue = 'c’est une bonne…';
+  else if(s.endsWith('j aime') || s.endsWith('j’aime')) cue = 'faire du sport…';
+  else if(s.endsWith('je vais')) cue = 'probablement essayer de…';
+  else if(s.endsWith('je suis')) cue = 'plutôt quelqu’un qui…';
+  else if(s.endsWith('et')) cue = 'en plus…';
+  else if(s.endsWith('mais')) cue = 'en même temps…';
+  else if(s.endsWith('aussi')) cue = 'j’essaie de…';
+  else if(s.endsWith('en plus')) cue = 'j’essaie aussi de…';
+  else if(s.endsWith('avec')) cue = 'mes amis…';
+  else if(s.endsWith('pour')) cue = 'améliorer mon français…';
+  else if((s.includes('temps libre')) && (s.endsWith('et') || s.endsWith('aussi'))) cue = 'passer du temps…';
+  else if(endsLikeCompleteIdea(raw)) { cue = 'Et aussi…'; kind = 'next'; }
+
+  return {cue, kind};
+}
+
+function oneWordRescue(raw){
+  const s = simplify(raw);
+  if(s.endsWith('une meilleure')) return 'qualité';
+  if(s.endsWith('je travaille comme')) return 'technicien';
+  if(s.endsWith('parce que')) return 'principalement';
+  if(s.endsWith('avec')) return 'mes';
+  if(s.endsWith('pour')) return 'améliorer';
+  if(s.endsWith('et')) return 'aussi';
+  if(s.endsWith('mais')) return 'cependant';
+  return 'ensuite';
+}
+
+async function deliverMeAssist(level='phrase'){
+  if(!session || paused || expectedSpeaker!=='me' || processing || speakingCue) return;
+  const raw = (meTurnBuffer || finalBuffer).trim();
+  if(!raw) return;
+
+  clearTimeout(meAssistTimer);
+  clearTimeout(meFinishTimer);
+
+  const result = continuationFor(raw);
+  let text = level==='word' ? oneWordRescue(raw) : result.cue;
+  let type = level==='word' ? 'word' : result.kind;
+
+  assistanceCount++;
+  assistanceLog.push({time:Date.now(), sourceText:raw, suggestion:text, type});
+  if($('assistCount')) $('assistCount').textContent=assistanceCount+' assists';
+
+  stopRecognition();
+  if($('meaningBlock')) $('meaningBlock').classList.add('hidden');
+  if($('starterText')) $('starterText').textContent=text;
+  $('cuePanel')?.classList.remove('hidden');
+  $('yourPanel')?.classList.add('hidden');
+  $('listenPanel')?.classList.add('hidden');
+
+  status(type==='next' ? 'Next-idea cue…' : 'Sentence rescue…');
+  configureAudio();
+  await speakCue(text);
+
+  setTimeout(()=>{
+    $('cuePanel')?.classList.add('hidden');
+    $('yourPanel')?.classList.remove('hidden');
+    status('Keep speaking · no correction.');
+    startRecognition({preserveMeBuffer:true});
+  },180);
+}
+
+function scheduleMePauseHandling(){
+  clearTimeout(meAssistTimer);
+  clearTimeout(meFinishTimer);
+
+  meAssistTimer=setTimeout(()=>{
+    if(!session || paused || expectedSpeaker!=='me' || processing || speakingCue) return;
+    const raw=(meTurnBuffer || finalBuffer).trim();
+    if(raw && autoAssistEnabled && looksUnfinished(raw)) deliverMeAssist('phrase');
+  },1250);
+
+  meFinishTimer=setTimeout(()=>{
+    if(!session || paused || expectedSpeaker!=='me' || processing || speakingCue) return;
+    const raw=(meTurnBuffer || finalBuffer).trim();
+    if(!raw) return;
+    if(endsLikeCompleteIdea(raw) || !looksUnfinished(raw)) finalizeMeTurn();
+    else if(autoAssistEnabled) deliverMeAssist('phrase');
+  },2650);
+}
+
+async function finalizeMeTurn(){
+  if(!session || paused || processing || expectedSpeaker!=='me') return;
+  const raw=(meTurnBuffer || finalBuffer).trim();
+  if(!raw) return;
+
+  processing=true;
+  clearTimeout(meAssistTimer); clearTimeout(meFinishTimer);
+  stopRecognition();
+  meTurnBuffer=''; finalBuffer='';
+
+  const a=fastAnalyze(raw);
+  turns.push({
+    id:Date.now()+'-'+Math.random(),
+    speaker:'me', confidence:Math.max(80,a.confidence || 80),
+    raw, normalized:a.normalized||raw,
+    assists:assistanceLog.slice(), time:Date.now()
+  });
+  renderTranscript();
+  arthurJustCued=false;
+  processing=false;
+  setExpected('them');
+  status('Listening to them…');
+  startRecognition();
+}
+
+function ensureRescueUI(){
+  const controls=$('liveControls');
+  if(controls && !$('rescueNow')){
+    const btn=document.createElement('button');
+    btn.id='rescueNow'; btn.className='secondary'; btn.textContent='⚡ Rescue';
+    btn.addEventListener('click',()=>deliverMeAssist('phrase'));
+    controls.appendChild(btn);
+  }
+
+  if($('replyCount') && !$('assistCount')){
+    const c=document.createElement('div');
+    c.id='assistCount'; c.className='counter'; c.style.marginTop='4px'; c.textContent='0 assists';
+    $('replyCount').parentElement?.appendChild(c);
+  }
+
+  const setupPage=$('setup');
+  if(setupPage && !$('autoAssistSetting')){
+    const cards=setupPage.querySelectorAll('.card');
+    const anchor=cards[cards.length-1];
+    if(anchor){
+      const card=document.createElement('div');
+      card.className='card';
+      card.innerHTML=`<div class="label">SENTENCE COPILOT</div>
+        <label class="switchrow"><span>Automatically help when I hesitate mid-sentence</span>
+        <input id="autoAssistSetting" type="checkbox" ${autoAssistEnabled?'checked':''}></label>
+        <p class="small">~1.25 s + unfinished phrase → next few words. ~2.65 s after a complete idea → your turn ends.</p>`;
+      anchor.insertAdjacentElement('beforebegin',card);
+      $('autoAssistSetting').addEventListener('change',e=>{
+        autoAssistEnabled=e.target.checked; config.autoAssist=autoAssistEnabled; saveConfig();
+      });
+    }
+  }
+}
+
 /* ----------------------- QWEN: OPTIONAL ----------------------- */
 
 async function loadAI(){
@@ -342,7 +541,6 @@ function newRecognition(){
 
   r.onresult=e=>{
     if(!session || paused || processing || speakingCue) return;
-
     let interim='',committed='';
     for(let i=e.resultIndex;i<e.results.length;i++){
       const txt=e.results[i][0].transcript.trim();
@@ -350,17 +548,22 @@ function newRecognition(){
       else interim+=(interim?' ':'')+txt;
     }
 
-    if(committed){
-      finalBuffer+=(finalBuffer?' ':'')+committed;
-      clearTimeout(silenceTimer);
-      silenceTimer=setTimeout(finalizeTurn,900);
-    }
-
-    const shown=(finalBuffer+' '+interim).trim();
-    if(expectedSpeaker==='them'){
-      if($('partialTranscript')) $('partialTranscript').textContent=shown;
-    }else{
+    if(expectedSpeaker==='me'){
+      if(committed){
+        meTurnBuffer+=(meTurnBuffer?' ':'')+committed;
+        finalBuffer='';
+        scheduleMePauseHandling();
+      }
+      const shown=(meTurnBuffer+' '+interim).trim();
       if($('yourPartial')) $('yourPartial').textContent=shown;
+    }else{
+      if(committed){
+        finalBuffer+=(finalBuffer?' ':'')+committed;
+        clearTimeout(silenceTimer);
+        silenceTimer=setTimeout(finalizeTurn,900);
+      }
+      const shown=(finalBuffer+' '+interim).trim();
+      if($('partialTranscript')) $('partialTranscript').textContent=shown;
     }
   };
 
@@ -368,7 +571,6 @@ function newRecognition(){
     status('Speech: '+e.error);
     if(['not-allowed','service-not-allowed'].includes(e.error)) showPermissionFallback();
   };
-
   r.onend=()=>{
     if(session && !paused && !processing && !speakingCue){
       setTimeout(()=>{try{r.start()}catch{}},120);
@@ -376,11 +578,13 @@ function newRecognition(){
   };
   return r;
 }
-
-function startRecognition(){
+function startRecognition(opts={}){
   if(!session || paused)return;
   stopRecognition();
   finalBuffer='';
+  if(expectedSpeaker!=='me' || !opts.preserveMeBuffer){
+    if(expectedSpeaker!=='me') meTurnBuffer='';
+  }
   recognition=newRecognition();
   try{recognition.start();hidePermissionFallback()}
   catch{showPermissionFallback()}
@@ -391,6 +595,8 @@ function stopRecognition(){
 }
 
 async function finalizeTurn(){
+  // THEM turns use this. ME turns are hesitation-aware.
+  if(expectedSpeaker==='me'){ scheduleMePauseHandling(); return; }
   if(!session || paused || processing || !finalBuffer.trim())return;
 
   processing=true;
@@ -419,6 +625,8 @@ async function finalizeTurn(){
   if(a.speaker==='them'){
     expectedSpeaker='me';
     arthurJustCued=true;
+    meTurnBuffer='';
+    clearTimeout(meAssistTimer); clearTimeout(meFinishTimer);
 
     if($('meaningText')) $('meaningText').textContent=a.meaning;
     if($('starterText')) $('starterText').textContent=a.start;
@@ -497,6 +705,7 @@ function renderTranscript(){
     box.appendChild(d);
   });
   if($('replyCount')) $('replyCount').textContent=turns.filter(t=>t.speaker==='me').length+' replies';
+  if($('assistCount')) $('assistCount').textContent=assistanceCount+' assists';
 }
 
 function showPermissionFallback(){
@@ -529,6 +738,8 @@ async function startLive({automatic=false}={}){
   paused=false;
   processing=false;
   turns=[];
+  meTurnBuffer=''; assistanceLog=[]; assistanceCount=0;
+  clearTimeout(meAssistTimer); clearTimeout(meFinishTimer);
   arthurJustCued=false;
   setExpected(config.defaultStarter||'them');
   renderTranscript();
@@ -597,7 +808,8 @@ if($('pauseLive')) $('pauseLive').onclick=()=>{
 
 if($('reverseTurn')) $('reverseTurn').onclick=()=>{
   if(!session)return;
-  stopRecognition();finalBuffer='';
+  stopRecognition();finalBuffer='';meTurnBuffer='';
+  clearTimeout(meAssistTimer);clearTimeout(meFinishTimer);
   setExpected(expectedSpeaker==='them'?'me':'them');
   arthurJustCued=false;
   status(`Reversed · expecting ${expectedSpeaker.toUpperCase()} next.`);
@@ -625,7 +837,14 @@ function localReview(){
 }
 
 if($('endConversation')) $('endConversation').onclick=async()=>{
+  if(session && expectedSpeaker==='me' && meTurnBuffer.trim()){
+    const raw=meTurnBuffer.trim();
+    const a=fastAnalyze(raw);
+    turns.push({id:Date.now()+'-'+Math.random(),speaker:'me',confidence:90,raw,normalized:a.normalized||raw,time:Date.now()});
+    meTurnBuffer='';
+  }
   session=false;paused=false;resumeAfterPage=false;
+  clearTimeout(meAssistTimer);clearTimeout(meFinishTimer);
   stopRecognition();clearTimeout(silenceTimer);resetAudio();
   setDot(engine?'ready':'off');
 
@@ -773,13 +992,15 @@ if($('defaultStarter')) $('defaultStarter').value=config.defaultStarter;
 setExpected(config.defaultStarter);
 
 async function boot(){
+  ensureRescueUI();
   renderHistory();
 
-  // Carry v5 setup state forward if it existed.
+  // Carry setup state forward from v6/v5.
   try{
-    const old=JSON.parse(localStorage.getItem('tcf-live-v5-config')||'null');
-    if(old && !config.setupComplete){
-      config={...config,...old,model:'Qwen2.5-0.5B-Instruct-q4f16_1-MLC'};
+    const prior=JSON.parse(localStorage.getItem('tcf-live-v6-config')||localStorage.getItem('tcf-live-v5-config')||'null');
+    if(prior && !config.setupComplete){
+      config={...config,...prior,model:'Qwen2.5-0.5B-Instruct-q4f16_1-MLC'};
+      autoAssistEnabled=config.autoAssist!==false;
       saveConfig();
     }
   }catch{}
