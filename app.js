@@ -3,8 +3,8 @@ import * as webllm from "https://esm.run/@mlc-ai/web-llm@0.2.82";
 const $ = id => document.getElementById(id);
 const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
 
-const CONFIG_KEY = 'tcf-live-v7-config';
-const HISTORY_KEY = 'tcf-live-v7-history';
+const CONFIG_KEY = 'tcf-live-v8-config';
+const HISTORY_KEY = 'tcf-live-v8-history';
 
 const WARMUPS = [
   ["les différentes étapes de la procédure","Pouvez-vous m'expliquer les différentes étapes de la procédure ?"],
@@ -66,6 +66,16 @@ let meFinishTimer = null;
 let assistanceLog = [];
 let assistanceCount = 0;
 let autoAssistEnabled = config.autoAssist !== false;
+
+// v8 iPhone/Safari turn-end detection
+let activeRecognitionText = '';
+let speechIdleTimer = null;
+let lastSpeechUpdateAt = 0;
+const intentionalStops = new WeakSet();
+const THEM_SILENCE_MS = 1350;
+const ME_ASSIST_MS = 1350;
+const ME_FINISH_MS = 2850;
+
 
 function loadConfig(){
   const defaults = {
@@ -299,6 +309,44 @@ function fastAnalyze(raw){
 }
 
 
+
+function joinSpeechParts(a,b){
+  const x=(a||'').trim(), y=(b||'').trim();
+  if(!x) return y;
+  if(!y) return x;
+  if(simplify(x).endsWith(simplify(y))) return x;
+  if(simplify(y).startsWith(simplify(x))) return y;
+  return `${x} ${y}`.replace(/\s+/g,' ').trim();
+}
+
+function currentMeText(){
+  return joinSpeechParts(meTurnBuffer, activeRecognitionText);
+}
+
+function stashActiveMeText(){
+  if(expectedSpeaker!=='me') return;
+  const t=(activeRecognitionText||'').trim();
+  if(t) meTurnBuffer=joinSpeechParts(meTurnBuffer,t);
+  activeRecognitionText='';
+}
+
+function clearSpeechIdle(){
+  clearTimeout(speechIdleTimer);
+  speechIdleTimer=null;
+}
+
+function scheduleThemSilenceFinalize(){
+  clearSpeechIdle();
+  speechIdleTimer=setTimeout(()=>{
+    if(!session || paused || processing || speakingCue || expectedSpeaker!=='them') return;
+    const raw=(activeRecognitionText||finalBuffer||'').trim();
+    if(!raw) return;
+    finalBuffer=raw;
+    activeRecognitionText='';
+    finalizeTurn();
+  },THEM_SILENCE_MS);
+}
+
 /* ------------------------------------------------------------------
    v7 ME-SIDE SENTENCE COPILOT
    Gives tiny continuation cues while the learner is speaking.
@@ -377,7 +425,7 @@ function oneWordRescue(raw){
 
 async function deliverMeAssist(level='phrase'){
   if(!session || paused || expectedSpeaker!=='me' || processing || speakingCue) return;
-  const raw = (meTurnBuffer || finalBuffer).trim();
+  const raw = currentMeText().trim();
   if(!raw) return;
 
   clearTimeout(meAssistTimer);
@@ -391,7 +439,8 @@ async function deliverMeAssist(level='phrase'){
   assistanceLog.push({time:Date.now(), sourceText:raw, suggestion:text, type});
   if($('assistCount')) $('assistCount').textContent=assistanceCount+' assists';
 
-  stopRecognition();
+  stashActiveMeText();
+  stopRecognition(true);
   if($('meaningBlock')) $('meaningBlock').classList.add('hidden');
   if($('starterText')) $('starterText').textContent=text;
   $('cuePanel')?.classList.remove('hidden');
@@ -416,13 +465,13 @@ function scheduleMePauseHandling(){
 
   meAssistTimer=setTimeout(()=>{
     if(!session || paused || expectedSpeaker!=='me' || processing || speakingCue) return;
-    const raw=(meTurnBuffer || finalBuffer).trim();
+    const raw=currentMeText().trim();
     if(raw && autoAssistEnabled && looksUnfinished(raw)) deliverMeAssist('phrase');
   },1250);
 
   meFinishTimer=setTimeout(()=>{
     if(!session || paused || expectedSpeaker!=='me' || processing || speakingCue) return;
-    const raw=(meTurnBuffer || finalBuffer).trim();
+    const raw=currentMeText().trim();
     if(!raw) return;
     if(endsLikeCompleteIdea(raw) || !looksUnfinished(raw)) finalizeMeTurn();
     else if(autoAssistEnabled) deliverMeAssist('phrase');
@@ -431,13 +480,14 @@ function scheduleMePauseHandling(){
 
 async function finalizeMeTurn(){
   if(!session || paused || processing || expectedSpeaker!=='me') return;
-  const raw=(meTurnBuffer || finalBuffer).trim();
+  stashActiveMeText();
+  const raw=currentMeText().trim();
   if(!raw) return;
 
   processing=true;
   clearTimeout(meAssistTimer); clearTimeout(meFinishTimer);
-  stopRecognition();
-  meTurnBuffer=''; finalBuffer='';
+  stopRecognition(true);
+  meTurnBuffer=''; activeRecognitionText=''; finalBuffer='';
 
   const a=fastAnalyze(raw);
   turns.push({
@@ -530,10 +580,20 @@ async function complete(messages,max_tokens=900){
   return r.choices?.[0]?.message?.content?.trim()||'';
 }
 
-/* ----------------------- SPEECH ----------------------- */
+/* ----------------------- SPEECH · v8 ----------------------- */
+
+function recognitionSnapshot(results){
+  let text='';
+  for(let i=0;i<results.length;i++){
+    const part=(results[i][0]?.transcript||'').trim();
+    if(part) text+=(text?' ':'')+part;
+  }
+  return text.replace(/\s+/g,' ').trim();
+}
 
 function newRecognition(){
   if(!SpeechRecognition) throw new Error('Speech recognition unavailable in this Safari/PWA.');
+
   const r=new SpeechRecognition();
   r.lang='fr-CA';
   r.continuous=true;
@@ -541,68 +601,137 @@ function newRecognition(){
 
   r.onresult=e=>{
     if(!session || paused || processing || speakingCue) return;
-    let interim='',committed='';
-    for(let i=e.resultIndex;i<e.results.length;i++){
-      const txt=e.results[i][0].transcript.trim();
-      if(e.results[i].isFinal) committed+=(committed?' ':'')+txt;
-      else interim+=(interim?' ':'')+txt;
-    }
+
+    // Critical v8 change:
+    // Keep the visible transcript even when Safari never marks it final.
+    const snapshot=recognitionSnapshot(e.results);
+    if(!snapshot) return;
+
+    activeRecognitionText=snapshot;
+    lastSpeechUpdateAt=Date.now();
 
     if(expectedSpeaker==='me'){
-      if(committed){
-        meTurnBuffer+=(meTurnBuffer?' ':'')+committed;
-        finalBuffer='';
-        scheduleMePauseHandling();
-      }
-      const shown=(meTurnBuffer+' '+interim).trim();
+      const shown=currentMeText();
       if($('yourPartial')) $('yourPartial').textContent=shown;
+
+      // Reset hesitation/end timers after EVERY transcript update,
+      // not only after a Web Speech "final" result.
+      clearTimeout(meAssistTimer);
+      clearTimeout(meFinishTimer);
+
+      meAssistTimer=setTimeout(()=>{
+        if(!session || paused || processing || speakingCue || expectedSpeaker!=='me') return;
+        const raw=currentMeText().trim();
+        if(raw && autoAssistEnabled && looksUnfinished(raw)){
+          deliverMeAssist('phrase');
+        }
+      },ME_ASSIST_MS);
+
+      meFinishTimer=setTimeout(()=>{
+        if(!session || paused || processing || speakingCue || expectedSpeaker!=='me') return;
+        const raw=currentMeText().trim();
+        if(!raw) return;
+
+        if(endsLikeCompleteIdea(raw) || !looksUnfinished(raw)){
+          finalizeMeTurn();
+        }else if(autoAssistEnabled){
+          deliverMeAssist('phrase');
+        }
+      },ME_FINISH_MS);
+
     }else{
-      if(committed){
-        finalBuffer+=(finalBuffer?' ':'')+committed;
-        clearTimeout(silenceTimer);
-        silenceTimer=setTimeout(finalizeTurn,900);
-      }
-      const shown=(finalBuffer+' '+interim).trim();
-      if($('partialTranscript')) $('partialTranscript').textContent=shown;
+      if($('partialTranscript')) $('partialTranscript').textContent=snapshot;
+
+      // Main screenshot bug fix:
+      // no new transcript for ~1.35 sec => treat THEM as finished,
+      // even when Safari keeps the whole sentence as "interim".
+      scheduleThemSilenceFinalize();
     }
   };
 
   r.onerror=e=>{
+    const deliberate=intentionalStops.has(r);
+
+    // "aborted" is expected whenever our app switches turns/restarts.
+    if(e.error==='aborted' && deliberate) return;
+
+    if(e.error==='aborted'){
+      // Safari can abort itself occasionally; don't frighten the user.
+      if(session && !paused && !processing && !speakingCue){
+        status('Listening restarted…');
+      }
+      return;
+    }
+
     status('Speech: '+e.error);
-    if(['not-allowed','service-not-allowed'].includes(e.error)) showPermissionFallback();
-  };
-  r.onend=()=>{
-    if(session && !paused && !processing && !speakingCue){
-      setTimeout(()=>{try{r.start()}catch{}},120);
+    if(['not-allowed','service-not-allowed'].includes(e.error)){
+      showPermissionFallback();
     }
   };
+
+  r.onend=()=>{
+    const deliberate=intentionalStops.has(r);
+    if(deliberate) return;
+
+    if(session && !paused && !processing && !speakingCue){
+      setTimeout(()=>{
+        if(recognition===r || !recognition){
+          try{ startRecognition({preserveMeBuffer:expectedSpeaker==='me'}); }catch{}
+        }
+      },160);
+    }
+  };
+
   return r;
 }
+
 function startRecognition(opts={}){
-  if(!session || paused)return;
-  stopRecognition();
-  finalBuffer='';
-  if(expectedSpeaker!=='me' || !opts.preserveMeBuffer){
-    if(expectedSpeaker!=='me') meTurnBuffer='';
+  if(!session || paused) return;
+
+  stopRecognition(true);
+  clearSpeechIdle();
+
+  if(expectedSpeaker!=='me'){
+    activeRecognitionText='';
+    finalBuffer='';
+  }else if(!opts.preserveMeBuffer){
+    activeRecognitionText='';
   }
+
   recognition=newRecognition();
-  try{recognition.start();hidePermissionFallback()}
-  catch{showPermissionFallback()}
+  try{
+    recognition.start();
+    hidePermissionFallback();
+  }catch{
+    showPermissionFallback();
+  }
 }
-function stopRecognition(){
-  try{recognition?.abort()}catch{}
-  recognition=null;
+
+function stopRecognition(intentional=true){
+  const r=recognition;
+  if(!r) return;
+
+  if(intentional) intentionalStops.add(r);
+  try{ r.abort(); }catch{}
+  if(recognition===r) recognition=null;
 }
 
 async function finalizeTurn(){
   // THEM turns use this. ME turns are hesitation-aware.
-  if(expectedSpeaker==='me'){ scheduleMePauseHandling(); return; }
-  if(!session || paused || processing || !finalBuffer.trim())return;
+  if(expectedSpeaker==='me'){
+    scheduleMePauseHandling();
+    return;
+  }
+
+  const captured=(finalBuffer || activeRecognitionText || '').trim();
+  if(!session || paused || processing || !captured) return;
 
   processing=true;
-  const raw=finalBuffer.trim();
+  clearSpeechIdle();
+  const raw=captured;
   finalBuffer='';
-  stopRecognition();
+  activeRecognitionText='';
+  stopRecognition(true);
 
   // Critical v6 change: cue generation is immediate and DOES NOT call Qwen.
   const a=fastAnalyze(raw);
@@ -738,7 +867,7 @@ async function startLive({automatic=false}={}){
   paused=false;
   processing=false;
   turns=[];
-  meTurnBuffer=''; assistanceLog=[]; assistanceCount=0;
+  meTurnBuffer=''; activeRecognitionText=''; assistanceLog=[]; assistanceCount=0;
   clearTimeout(meAssistTimer); clearTimeout(meFinishTimer);
   arthurJustCued=false;
   setExpected(config.defaultStarter||'them');
@@ -756,7 +885,7 @@ function showSetupGate(){
 }
 function pauseForNavigation(){
   if(!session||paused)return;
-  paused=true;resumeAfterPage=true;stopRecognition();updatePhase();
+  paused=true;resumeAfterPage=true;clearSpeechIdle();stopRecognition(true);updatePhase();
 }
 function resumeFromNavigation(){
   if(session&&paused&&resumeAfterPage){
@@ -801,14 +930,14 @@ if($('tapToListen')) $('tapToListen').onclick=()=>{
 if($('pauseLive')) $('pauseLive').onclick=()=>{
   if(!session)return;
   paused=!paused;
-  if(paused){stopRecognition();status('Live paused.')}
+  if(paused){clearSpeechIdle();stopRecognition(true);status('Live paused.')}
   else{startRecognition();status('Listening resumed.')}
   updatePhase();
 };
 
 if($('reverseTurn')) $('reverseTurn').onclick=()=>{
   if(!session)return;
-  stopRecognition();finalBuffer='';meTurnBuffer='';
+  clearSpeechIdle();stopRecognition(true);finalBuffer='';activeRecognitionText='';meTurnBuffer='';
   clearTimeout(meAssistTimer);clearTimeout(meFinishTimer);
   setExpected(expectedSpeaker==='them'?'me':'them');
   arthurJustCued=false;
@@ -845,7 +974,7 @@ if($('endConversation')) $('endConversation').onclick=async()=>{
   }
   session=false;paused=false;resumeAfterPage=false;
   clearTimeout(meAssistTimer);clearTimeout(meFinishTimer);
-  stopRecognition();clearTimeout(silenceTimer);resetAudio();
+  clearSpeechIdle();stopRecognition(true);clearTimeout(silenceTimer);resetAudio();
   setDot(engine?'ready':'off');
 
   const mine=turns.filter(t=>t.speaker==='me');
@@ -993,6 +1122,11 @@ setExpected(config.defaultStarter);
 
 async function boot(){
   ensureRescueUI();
+
+  // Easy visual confirmation that the refreshed build is active.
+  const sub=document.querySelector('.sub');
+  if(sub && !sub.textContent.includes('v8')) sub.textContent += ' · v8';
+
   renderHistory();
 
   // Carry setup state forward from v6/v5.
